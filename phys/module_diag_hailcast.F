@@ -1069,11 +1069,11 @@ END SUBROUTINE hailcast_diagnostic_driver
       !!!  FOR HAILSTONE:  FIRST TEST IF STONE IS IN WET OR DRY GROWTH
       RATIO = 1./273.155
       IF(ITYPE.EQ.2) THEN !!WET GROWTH
-        ESAT=611.*EXP(ALV/RV*(RATIO-1./TS))
+        ESAT=611.*EXP(ALV/RV*(RATIO-1./TS)) !From (2.11) of RY89. Units Pa
       ELSE  !!DRY GROWTH
         ESAT=611.*EXP(ALS/RV*(RATIO-1./TS))
       ENDIF
-      RHOKOR=ESAT/(RV*TS)
+      RHOKOR=ESAT/(RV*TS)  !kg /m3
       
       !!!  NOW FOR THE AMBIENT/IN-CLOUD CONDITIONS 
       ESATW=611.*EXP(ALV/RV*(RATIO-1./TC))
@@ -1085,7 +1085,7 @@ END SUBROUTINE hailcast_diagnostic_driver
 
       !!!  CALC THE DIFFERENCE(KG/M3): <0 FOR CONDENSATION, 
       !!!  >0 FOR EVAPORATION
-      DELRW=(RHOKOR-RHOOMG) 
+      DELRW=(RHOKOR-RHOOMG) !hailstone - environment. Units kg/m3.
 
   END SUBROUTINE VAPORCLOSE
      
@@ -1099,7 +1099,7 @@ END SUBROUTINE hailcast_diagnostic_driver
             
       IMPLICIT NONE
       REAL*8 D
-      REAL GM,GM1,GMW,GMI,DGM,DGMW,DGMI,DI,ANU,RE,AE,  &
+      REAL GM,GM1,GMW,GMI,DGM,DGMW,DGMI,DI,DI_SI,ANU,RE,AE,  &
                  TC,TS,P,DENSE,DENSA,FW,VT,XW,XI,SEKDEL,DELRW
       INTEGER ITYPE 
       !local variables
@@ -1112,8 +1112,12 @@ END SUBROUTINE hailcast_diagnostic_driver
       PI=3.141592654
 
       !!!  CALCULATE THE DIFFUSIVITY DI (m2/s)
-      D0=0.226*1.E-4  ! change to m2/s, not cm2/s
-      DI=D0*(TC/273.155)**1.81*(100000./P)
+      !Returning to RH87 Appendix A calculation for DI (their Dv).
+      ! They want temperature in K, pressure in hPa, and produces
+      ! results in cm2 s-1.
+      DI = 0.211*(TC/273.15)**1.94 * (1013.25/(P*1E-2))  !cm2 s-1
+      DI_SI = DI * (1E-2)**2.  !m2 s-1, b/c multiplied by (1m/100cm)^2
+
   
       !!!  COLLECTION EFFICIENCY FOR WATER AND ICE 
       !EW=1.0      
@@ -1138,21 +1142,24 @@ END SUBROUTINE hailcast_diagnostic_driver
 
       !!!  CALCULATE THE VENTILATION COEFFICIENT - NEEDED FOR GROWTH FROM VAPOR
       !The coefficients in the ventilation coefficient equations have been 
-      !experimentally derived, and are expecting cal-C-g units.  Do some conversions.
-      DENSAC = DENSA * (1.E3) * (1.E-6)
-      !dynamic viscosity 
-      ANU=1.717E-5*(393.0/(TC+120.0))*(TC/273.155)**1.5  !RAS units fix to agree with Roger and Yau ps. 102
-      !!!  CALCULATE THE REYNOLDS NUMBER - unitless
-      RE=D*VT*DENSAC/ANU   
+      !experimentally derived, and are expecting cal-C-g units.  However,
+      !the Reynolds number is a ratio, so as long as all the units cancel
+      !we should be good.
+      !
+      !Dynamic viscosity 
+      !RAS exponent fix to agree with Roger and Yau ps. 102
+      ANU=1.717E-5*(393.0/(TC+120.0))*(TC/273.155)**1.5   !kg m-1 s-1     
+      !!!  CALCULATE THE REYNOLDS NUMBER - unitless, and all in SI units
+      RE=D*VT*DENSA/ANU   
       E=(0.60)**(0.333333333)*(RE**0.50) !ventilation coefficient vapor (fv)
       !!!   SELECT APPROPRIATE VALUES OF AE ACCORDING TO RE
       IF(RE.LT.6000.0)THEN
          AE=0.78+0.308*E
       ELSEIF(RE.GE.6000.0.AND.RE.LT.20000.0)THEN
          !RAS 190713
-         AE=0.5*0.76*E !bug fix to match RasmussenHeymsfield1987
+         AE=0.5*0.76*E !RH87 Table 1 eq. 4 shifts from factor of 4 to factor of 2 
       ELSEIF(RE.GE.20000.0) THEN
-         AE = 0.5*(0.57+9.0E-6*RE)*E !bug fix to match RasmussenHeymsfield1987
+         AE = 0.5*(0.57+9.0E-6*RE)*E !RH87 Table 1 eq. 4 shifts from factor of 4 to factor of 2 
       ENDIF
 
 
@@ -1181,7 +1188,7 @@ END SUBROUTINE hailcast_diagnostic_driver
   
       !!! CALCULATE INCREASE IN MASS DUE TO SUBLIMATION/CONDENSATION OF 
       !!! WATER VAPOR
-      DGMV = SEKDEL*2*PI*D*AE*DI*DELRW
+      DGMV = SEKDEL*2*PI*D*AE*DI_SI*DELRW
       IF (DGMV .LT. 0) DGMV=0
 
       !!!  CALCULATE THE TOTAL MASS CHANGE 
@@ -1196,8 +1203,16 @@ END SUBROUTINE hailcast_diagnostic_driver
           IF ((DGMW.GT.0).OR.(DGMV.GT.0)) THEN
              !MEAN CLOUD DROPLET RADIUS, ASSUME CLOUD DROPLET CONC OF 3E8 M-3 (300 CM-3)
              DC = (0.74*XW / (3.14159*1000.*3.E8))**0.33333333 * 1.E6 !MICRONS
-             !!! FIND THE STOKES NUMBER  (rasmussen heymsfield 1985)
-             NS = 2*VT*100.*(DC*1.E-4)**2. / (9*ANU*D*50)  !need hail radius in cm
+             !!! FIND THE STOKES NUMBER  (rasmussen heymsfield 1985 eq. 4) which uses cm-g-sec units
+             !NS = 2 * VT * r_droplet**2 * rho_droplet / (9 * dyn_viscosity * r_hail) 
+             !  VT (m/s) * 100 = vt (cm/s)
+             !  r_droplet = DC (micron) * 10**-4 = DC (cm)
+             !  rho_droplet = 1 g/cm3
+             !  D (m) * 50 = r_hail (cm), where D (cm) = 2 * r_hail (cm)
+             !  dyn_viscosity (g cm-1 s-1), OR 
+             !      ANU (kg m-1 s-1) * (1000 g/1kg) * (1m/100cm) --> 10 * ANU produces g cm-1 s-1
+             NS = 2* (VT*100.) * (DC*1.E-4)**2. / (9 * (10*ANU) * (D*50))  
+
              !!! FIND IMPACT VELOCITY (rasmussen heymsfield 1985)
              !W = LOG10(NS) - bug fix 20221216 - RAS !
              IF (NS.LT.0.1)THEN
@@ -1206,36 +1221,36 @@ END SUBROUTINE hailcast_diagnostic_driver
                 W = LOG10(NS)
              ENDIF
              IF (RE.GT.200) THEN
-                IF (NS.LT.0.1) THEN
+                IF (NS.LE.0.1) THEN
                    VIMP = 0.0
-                ELSEIF ((NS.GE.0.1).AND.(NS.LE.10)) THEN
+                ELSEIF ((NS.GT.0.1).AND.(NS.LE.10)) THEN
                    VIMP = (0.356 + 0.4738*W - 0.1233*W**2. &
                            -0.1618*W**3. + 0.0807*W**4.)*VT
                 ELSEIF (NS.GT.10) THEN
                    VIMP = 0.63*VT
                 ENDIF
              ELSEIF ((RE.GT.65).AND.(RE.LE.200)) THEN
-                IF (NS.LT.0.1) THEN
+                IF (NS.LE.0.1) THEN
                    VIMP = 0.0
-                ELSEIF ((NS.GE.0.1).AND.(NS.LE.10)) THEN
+                ELSEIF ((NS.GT.0.1).AND.(NS.LE.10)) THEN
                    VIMP = (0.3272 + 0.4907*W - 0.09452*W**2. &
                            -0.1906*W**3. + 0.07105*W**4.)*VT
                 ELSEIF (NS.GT.10) THEN
                    VIMP = 0.61*VT
                 ENDIF
              ELSEIF ((RE.GT.20).AND.(RE.LE.65)) THEN
-                IF (NS.LT.0.1) THEN
+                IF (NS.LE.0.1) THEN
                    VIMP = 0.0
-                ELSEIF ((NS.GE.0.1).AND.(NS.LE.10)) THEN
+                ELSEIF ((NS.GT.0.1).AND.(NS.LE.10)) THEN
                    VIMP = (0.2927 + 0.5085*W - 0.03453*W**2. &
                            -0.2184*W**3. + 0.03595*W**4.)*VT
                 ELSEIF (NS.GT.10) THEN
                    VIMP = 0.59*VT
                 ENDIF
              ELSEIF (RE.LE.20) THEN
-                IF (NS.LT.0.4) THEN
+                IF (NS.LE.0.4) THEN
                    VIMP = 0.0
-                ELSEIF ((NS.GE.0.4).AND.(NS.LE.10)) THEN
+                ELSEIF ((NS.GT.0.4).AND.(NS.LE.10)) THEN
                    VIMP = (0.1701 + 0.7246*W + 0.2257*W**2. &
                            -1.13*W**3. + 0.5756*W**4.)*VT
                 ELSEIF (NS.GT.10) THEN
@@ -1244,9 +1259,18 @@ END SUBROUTINE hailcast_diagnostic_driver
              ENDIF
               
              !RIME LAYER DENSITY, HEYMSFIELD AND PFLAUM 1985 FORM
-             TSCELSIUS = TS - 273.16 
+             TSCELSIUS = TS - 273.16 ! The constant here, 273.16, is purposefully chosen
+             ! to be slightly larger than 273.155. That way a TS of
+             ! exactly 273.155 doesn't result in an undefined
+             ! AFACTOR. When in transition, for a few timesteps 
+             ! hailstones can have a TS of 273.155 but no retained 
+             ! liquid water on their surface. Is such a hailstone 
+             ! in officially wet or dry growth? Not clear. This
+             ! kludge is the result.
              AFACTOR = -DC*VIMP/TSCELSIUS
-             IF ((TSCELSIUS.LE.-5.).OR.(AFACTOR.GE.-1.60)) THEN
+             !IF ((TSCELSIUS.LE.-5.).OR.(AFACTOR.GE.-1.60)) THEN
+             !error in AFACTOR sign in HF85
+             IF ((TSCELSIUS.LE.-5.).AND.(AFACTOR.GE.1.60)) THEN  
                  DENSELW = 0.30*(AFACTOR)**0.44
              ELSE
                  DENSELW = EXP(-0.03115 - 1.7030*AFACTOR + &
@@ -1255,7 +1279,7 @@ END SUBROUTINE hailcast_diagnostic_driver
 
              DENSELW = DENSELW * 1000. !KG M-3
              !BOUND POSSIBLE DENSITIES
-             IF (DENSELW.LT.100) DENSELW=100
+             IF (DENSELW.LT.500) DENSELW=500 !more realistic minimum density
              IF (DENSELW.GT.900) DENSELW=900
              !WRITE(12,*) 'MASSAGR, PFLAUM, MACKLIN: ', DENSELW, &
              !             MACKLIN_DENSELW
@@ -1295,17 +1319,18 @@ END SUBROUTINE hailcast_diagnostic_driver
       ENDIF
 
       !!!VOLUME OF NEW LAYER
-      !VOLL = (DGM) / DENSEL
-      !VOLL = (DGMI+DGMV+DGMW_NOSOAK) / DENSEL
-      !VOLL = (DGMI) / DENSELI + (DGMW_NOSOAK+DGMV) / DENSELW
-      IF (DGMI.LE.0) THEN
-         VOLL = (DGMW_NOSOAK+DGMV) / DENSELW
-      ELSE IF (DGMW.LE.0) THEN
-         VOLL = (DGMI) / DENSELI
+      IF (DGM.GT.0) THEN !require at least some growth before calculating new layer volume
+        IF (DGMI.LE.0) THEN
+            VOLL = (DGMW_NOSOAK+DGMV) / DENSELW
+        ELSE IF (DGMW.LE.0) THEN
+            VOLL = (DGMI) / DENSELI
+        ELSE
+            VOLL = (DGMI) / DENSELI + (DGMW_NOSOAK+DGMV) / DENSELW
+        ENDIF
       ELSE
-         VOLL = (DGMI) / DENSELI + (DGMW_NOSOAK+DGMV) / DENSELW
+          VOLL = 0.
       ENDIF
-
+      
       !!!NEW TOTAL VOLUME, DENSITY, DIAMETER
       VOLT = VOLL + GM/DENSE
       !DENSE = (GM+DGM) / VOLT
@@ -1356,7 +1381,7 @@ END SUBROUTINE hailcast_diagnostic_driver
       TSCm1 = TSm1 - 273.155
       TSCm2 = TSm2 - 273.155
       TCC = TC - 273.155
-      DELRWC = DELRW * (1.E3) * (1.E-6)
+      DELRWC = DELRW * (1.E3) * (1.E-6)  !kg/m3 --> g/cm3
       DENSAC = DENSA * (1.E3) * (1.E-6)
       !DI still in cm2/sec
       DCM = D * 100.  !m to cm
@@ -1370,10 +1395,10 @@ END SUBROUTINE hailcast_diagnostic_driver
       !!!  CALCULATE THE CONSTANTS 
       AK=(5.8+0.0184*TCC)*1.E-5  !thermal conductivity - cal/(cm*sec*K)
       !dynamic viscosity - calculated in MASSAGR
-      !ANU=1.717E-5*(393.0/(TC+120.0))*(TC/273.155)**1.5
+      !ANU=1.717E-5*(393.0/(TC+120.0))*(TC/273.155)**1.5 ! kg m-1 s-1
 
       !!!  CALCULATE THE REYNOLDS NUMBER - unitless
-      !RE=D*VT*DENSAC/ANU  - calculated in MASSAGR  
+      !RE=D*VT*DENSAC/ANU  - calculated in MASSAGR, where all inputs are in SI units.
       
       H=(0.71)**(0.333333333)*(RE**0.50) !ventilation coefficient heat (fh)
       !E=(0.60)**(0.333333333)*(RE**0.50) !ventilation coefficient vapor (fv)
@@ -1384,10 +1409,10 @@ END SUBROUTINE hailcast_diagnostic_driver
          !AE=0.78+0.308*E
       ELSEIF(RE.GE.6000.0.AND.RE.LT.20000.0)THEN
         !RAS 190713
-        AH=0.5*0.76*H !bug fix to match RasmussenHeymsfield1987
+        AH=0.5*0.76*H  !RH87 Table 1 eq. 4 shifts from factor of 4 to factor of 2
       ELSEIF(RE.GE.20000.0) THEN
          !RAS 190713
-        AH=0.5*(0.57+9.0E-6*RE)*H !bug fix to match RasmussenHeymsfield1987
+        AH=0.5*(0.57+9.0E-6*RE)*H  !RH87 Table 1 eq. 4 shifts from factor of 4 to factor of 2
          !AE=(0.57+9.0E-6*RE)*E  calculated in MASSAGR
       ENDIF
 
@@ -1401,8 +1426,17 @@ END SUBROUTINE hailcast_diagnostic_driver
          !TSC=TSC-TSC*DGM/GM1+SEKDEL/(GM1*CI)*                &
          !   (2.*PI*D*(AH*AK*(TCC-TSC)-AE*ALS*DI*DELRWC)+     &
          !   DGMW/SEKDEL*(ALF+CW*TCC)+DGMI/SEKDEL*CI*TCC)
-         !units fix
-         TSC=0.6*(TSC-TSC*DGMC/GM1C+SEKDEL/(GM1C*CI)*                &
+        !Note about signs, RAS 20240124 - !The second and third lines
+        !  in the coded equation below are equivalent to
+        ! -dq/dt in RH87 Table 1 Eqs. 3-5. dq/dt is positive
+        ! when heat is fluxing AWAY from the hailstone, which 
+        ! would result in a decrease in TSC. Using a -dq/dt
+        ! term ensures it is appropriately related to TSC.
+        !The TCC term below is T_env - T_hailstone. 
+        ! DELRWC, conversely, is rho_hailstone - rho_env. Because
+        ! these are different, a different sign is used before the 
+        ! term with DELRWC.
+        TSC=0.6*(TSC-TSC*DGMC/GM1C+SEKDEL/(GM1C*CI)*                &
             (2.*PI*DCM*(AH*AK*(TCC-TSC)-AE*ALS*DI*DELRWC)+     &
             DGMWC/SEKDEL*(ALF+CW*TCC)+DGMIC/SEKDEL*CI*TCC)) + &
             0.2*TSCm1 + 0.2*TSCm2
@@ -1412,7 +1446,9 @@ END SUBROUTINE hailcast_diagnostic_driver
             TS=273.155
          ENDIF
          TDIFF = ABS(TS-273.155)         
-         IF (TDIFF.LE.1.E-6) ITYPE=2  !NOW IN WET GROWTH
+         !IF (TDIFF.LE.1.E-6) ITYPE=2  !NOW IN WET GROWTH
+         !Also can enter wet growth if environmental temperature is > 0C
+         IF ((TS.GE.273.155).OR.(TC.GT.273.155)) ITYPE=2  !NOW IN WET GROWTH
      
       ELSE IF (ITYPE.EQ.2) THEN
       !!!  WET GROWTH; CALC NEW FW          
@@ -1423,15 +1459,17 @@ END SUBROUTINE hailcast_diagnostic_driver
             !    (2.*PI*D*(AH*AK*TCC-AE*ALV*DI*DELRWC)+          &
             !    DGMW/SEKDEL*(ALF+CW*TCC)+DGMI/SEKDEL*CI*TCC)
             !units fixed
+            !See note about signs up by dry growth equation above; still relevant here
             FW = FW-FW*DGMC/GMC+SEKDEL/(GMC*ALF)*               &
                  (2.*PI*DCM*(AH*AK*TCC-AE*ALV*DI*DELRWC)+          &
                  DGMWC/SEKDEL*(ALF+CW*TCC)+DGMIC/SEKDEL*CI*TCC)
          ELSE
             !Calculate decrease in ice mass due to melting
-            !!Bug fix 28Jul2021 RAS - non-SI units
-            !More non-SI units -  fixed 20220307 RAS
-            ! Extra SEKDEL in the calculation - 20221102 RAS
-            DMLT = SEKDEL  / ALF * (2.*PI*DCM*AH*AK*TCC + 2.*PI*DCM*AE*ALV*DI*DELRWC + &
+            !Note about signs, RAS 20240124 - when TCC is positive it means an
+            ! increase in melting. When DELRWC is positive, it means
+            ! a flux of vapor away from the hailstone, but that's a decrease
+            ! in temperature. 
+            DMLT = SEKDEL  / ALF * (2.*PI*DCM*AH*AK*TCC - 2.*PI*DCM*AE*ALV*DI*DELRWC + &
                     DGMWC/SEKDEL*CW*TCC) 
             FW = (FW*GM1C + DMLT + DGMWC) / GMC
          ENDIF
@@ -1591,7 +1629,7 @@ END SUBROUTINE hailcast_diagnostic_driver
       !Calculate new mass growth
       dmdt = (-1.7*pi*r*(re**0.5)/lf)*((ka*delt)+((lv-lf)*dv*dsig))
       IF (dmdt.gt.0.) dmdt = 0
-      mass = dmdt*tres ! < 0
+      mass = dmdt*tres !flip from <0; now represents frozen mass lost due to melt
       
       !Find the new hailstone diameter
       massorg = 1.33333333*pi*r*r*r*rhoice
