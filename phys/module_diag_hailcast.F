@@ -1188,7 +1188,7 @@ END SUBROUTINE hailcast_diagnostic_driver
   
       !!! CALCULATE INCREASE IN MASS DUE TO SUBLIMATION/CONDENSATION OF 
       !!! WATER VAPOR
-      DGMV = SEKDEL*2*PI*D*AE*DI_SI*DELRW
+      DGMV = SEKDEL*2*PI*D*AE*DI_SI*(-DELRW) !! account for DELRW convection of <0 when condensation 
       IF (DGMV .LT. 0) DGMV=0
 
       !!!  CALCULATE THE TOTAL MASS CHANGE 
